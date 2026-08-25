@@ -50,9 +50,20 @@ upload it, then download and double-click the resulting `.cer`.
    and the key is what you are exporting.
 2. Expand the certificate's triangle and confirm a private key sits under it.
 3. Select **both** certificates → right-click → *Export 2 items…* → save as
-   `.p12` and set a password. Exporting both together means you only need
-   `MACOS_CERT_P12`; export them separately if you would rather keep the
-   installer certificate in its own secret.
+   `.p12`. Exporting both together means you only need `MACOS_CERT_P12`;
+   export them separately if you would rather keep the installer certificate
+   in its own secret.
+
+Creating a certificate never asks for a password — the password is invented
+here, at export. Two prompts follow each other and mean different things:
+
+| Prompt | What it wants |
+|---|---|
+| *"Enter a password which will be used to protect the exported items"* | A password you choose. **This is `MACOS_CERT_PASSWORD`.** |
+| *"Keychain Access wants to export key…"* | Your Mac login password, authorizing the private key to leave the keychain. Not stored anywhere. |
+
+Leaving the export password blank is allowed and a bad idea: a `.p12` with no
+password is a usable signing identity for anyone who gets the file.
 
 **Encode and store:**
 
