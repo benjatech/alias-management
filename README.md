@@ -24,6 +24,7 @@ It manages three kinds of aliases:
 | type | what it does | example |
 |---|---|---|
 | `command` | run any shell command | `gp` → `git pull` |
+| `function` | a command taking arguments | `gc "fix"` → `git commit -m "fix"` |
 | `folder` | jump to a directory | `p` → `cd ~/folder/personal` |
 | `ssh` | connect to a server | `srv` → `ssh forge@127.0.0.1` |
 
@@ -210,6 +211,44 @@ The alias is appended to `~/.alias-management`, and `am` reminds you to run
 `source ~/.alias-management` to use it in the shell you are standing in. New
 shells pick it up on their own.
 
+### Commands that take arguments
+
+An alias cannot see the arguments it is called with — bash substitutes the
+text and appends whatever you typed, so `$1` inside one is never your
+argument. Write `$1`, `$2`, ... anyway and `am` notices, storing a shell
+function instead:
+
+```bash
+$ am new -c gc 'git commit -a -m "$1"'
+Saved: gc() { [ $# -ge 1 ] || { echo "am: gc needs 1 argument" >&2; return 2; }; git commit -a -m "$1"; } #function
+Saved as a shell function, because it takes 1 argument — an alias cannot.
+```
+
+```bash
+$ gc "a real message"      # [master 47d70ef] a real message
+$ gc                       # am: gc needs 1 argument
+```
+
+The check in front of the body is why the arguments have to be numbered.
+`$*` and `$@` swallow whatever they are handed, so a forgotten argument would
+quietly become an empty string; numbered parameters can be counted, and `am`
+refuses `$*` and `$@` for that reason. They must also start at `$1` and leave
+no gaps — `$2` with no `$1` is only ever a mistake:
+
+```bash
+$ am new -c bad 'echo "$2"'
+error: '$2' is used but '$1' is not: numbered arguments must start at $1 with no gaps
+```
+
+`am list` shows these as type `function` and prints the command you typed
+rather than the generated check. `--function` filters to just them. Deleting
+one reminds you to `unset -f` rather than `unalias`, since that is what
+removes a function from an open shell.
+
+Two smaller differences from an alias: the body may contain both `'` and `"`,
+because nothing wraps it, and it may not contain `#`, which would comment out
+the rest of the line.
+
 **In a hurry?** Give any part up front with `-f` (folder), `-c` (command)
 or `-s` (ssh) — am only asks for what is missing:
 
@@ -311,6 +350,7 @@ the type:
 alias gp="git pull" #command
 alias p="cd ~/folder/personal" #folder
 alias srv="ssh forge@127.0.0.1" #ssh
+gc() { [ $# -ge 1 ] || { echo "am: gc needs 1 argument" >&2; return 2; }; git commit -a -m "$1"; } #function
 ```
 
 Anything else in the file — comments, blank lines, hand-written bash,

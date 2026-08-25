@@ -3,7 +3,9 @@
 //! Aliases live in `~/.alias-management` (plain bash, one alias per line with
 //! a trailing `#command` / `#folder` / `#ssh` marker). A marker-delimited
 //! block in `~/.bash_profile` sources that file when a shell starts, so
-//! managed aliases are available in every new shell.
+//! managed aliases are available in every new shell. A command that takes
+//! arguments is stored as a one-line shell function instead, marked
+//! `#function`, since an alias cannot see what it was called with.
 
 use std::env;
 use std::fs;
@@ -38,6 +40,7 @@ const ALIAS_FILE_HEADER: &str = "\
 #   alias <name>=\"<action>\" #command
 #   alias <name>=\"<action>\" #folder
 #   alias <name>=\"<action>\" #ssh
+#   <name>() { <command using $1> } #function
 # are owned by am. Anything else in this file is left untouched.
 ";
 
@@ -75,6 +78,26 @@ static ALIAS_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("alias line regex is valid")
 });
 
+/// A managed function line: `name() { <body> } #function`. Functions exist
+/// because an alias cannot take arguments — see [`arg_arity`]. The body is
+/// matched greedily so a `}` inside it does not end the match early.
+static FUNCTION_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^\s*([A-Za-z0-9_][A-Za-z0-9_.-]*)\(\)\s*\{\s*(.*)\}\s*#\s*function\s*$"#)
+        .expect("function line regex is valid")
+});
+
+/// The argument check `am` puts at the front of every generated function
+/// body, stripped again when the line is read back so `am list` shows what
+/// was typed rather than the plumbing.
+static FUNCTION_GUARD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^\[ \$# -ge \d+ \] \|\| \{ echo "[^"]*" >&2; return 2; \}; "#)
+        .expect("function guard regex is valid")
+});
+
+/// Positional parameters (`$1`, `${2}`) inside an action.
+static ARG_PLACEHOLDER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{?([1-9])\}?").expect("placeholder regex is valid"));
+
 /// Valid alias names. This is also the injection gate: a name is only ever
 /// handed to a subprocess after it has passed this check.
 static NAME_RE: LazyLock<Regex> =
@@ -100,6 +123,9 @@ Aliases are stored as plain bash with a trailing type marker:\n    \
 alias gp=\"git pull\" #command\n    \
 alias p=\"cd ~/folder/personal\" #folder\n    \
 alias srv=\"ssh forge@127.0.0.1\" #ssh\n\n\
+A command that uses $1, $2, ... is stored as a shell function instead, since \
+an alias cannot see its arguments. am adds a check so calling it with too \
+few says so rather than running with empty ones.\n\n\
 Run `am list` to see everything it manages; bare `am` shows this help.",
     after_help = "Examples:\n  \
 am list                  List managed aliases in a table\n  \
@@ -108,6 +134,7 @@ am list --search git     Aliases with 'git' in the name or action\n  \
 am new                   Interactively create a new alias\n  \
 am new -f here           Folder alias 'here' for the current directory\n  \
 am new -c gp 'git pull'  Command alias, no prompts\n  \
+am new -c gc 'git commit -m \"$1\"'  Takes an argument, saved as a function\n  \
 am new -s srv forge@127.0.0.1  SSH alias, no prompts\n  \
 am delete gp             Delete 'gp' after a confirmation prompt\n  \
 am install               Copy this binary to a folder on PATH\n\n\
@@ -132,6 +159,7 @@ am new -f here                  folder alias 'here' for the current directory\n 
 am new -c                       command alias, asks name and command\n  \
 am new -c gp                    command alias 'gp', asks the command\n  \
 am new -c gp 'git pull'         command alias, no prompts\n  \
+am new -c gc 'git commit -m \"$1\"'  command taking one argument\n  \
 am new -s                       ssh alias, asks name, user and host\n  \
 am new -s srv                   ssh alias 'srv', asks user and host\n  \
 am new -s srv forge             ssh alias 'srv', user 'forge', asks the host\n  \
@@ -140,7 +168,11 @@ am new -s srv forge@127.0.0.1   same, in user@host form\n\n\
 Before saving, the name is checked against aliases already managed here and \
 against everything visible in a login shell (binaries, builtins, functions \
 and existing aliases), so an existing name is never shadowed. The new alias \
-is appended to ~/.alias-management."
+is appended to ~/.alias-management.\n\n\
+A command mentioning $1, $2, ... is saved as a shell function rather than an \
+alias, because an alias cannot see the arguments it is called with. They must \
+start at $1 and leave no gaps; $* and $@ are refused, since nothing can check \
+whether an argument was actually given."
     )]
     New {
         #[arg(
@@ -181,6 +213,8 @@ it looks inside folder paths, command lines and ssh targets alike."
         command: bool,
         #[arg(short = 's', long = "ssh", help = "Show ssh aliases")]
         ssh: bool,
+        #[arg(long = "function", help = "Show command aliases that take arguments")]
+        function: bool,
         #[arg(
             long = "search",
             value_name = "TEXT",
@@ -239,6 +273,9 @@ enum AliasKind {
     Command,
     Folder,
     Ssh,
+    /// A command taking arguments, stored as a shell function rather than an
+    /// alias. Ordered last so `am list` keeps plain aliases together.
+    Function,
 }
 
 impl AliasKind {
@@ -247,6 +284,7 @@ impl AliasKind {
             AliasKind::Command => "command",
             AliasKind::Folder => "folder",
             AliasKind::Ssh => "ssh",
+            AliasKind::Function => "function",
         }
     }
 
@@ -255,6 +293,7 @@ impl AliasKind {
             "command" => Some(AliasKind::Command),
             "folder" => Some(AliasKind::Folder),
             "ssh" => Some(AliasKind::Ssh),
+            "function" => Some(AliasKind::Function),
             _ => None,
         }
     }
@@ -300,6 +339,7 @@ fn run(cli: Cli) -> Result<()> {
             folder,
             command,
             ssh,
+            function,
             search,
         }) => {
             let mut kinds = Vec::new();
@@ -311,6 +351,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             if ssh {
                 kinds.push(AliasKind::Ssh);
+            }
+            if function {
+                kinds.push(AliasKind::Function);
             }
             cmd_list(&alias_path, &kinds, search.as_deref())
         }
@@ -417,6 +460,22 @@ fn with_profile_block(content: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn parse_alias_line(line: &str) -> Option<AliasEntry> {
+    if let Some(caps) = FUNCTION_LINE_RE.captures(line) {
+        let name = caps.get(1)?.as_str().to_string();
+        let body = caps.get(2)?.as_str().trim();
+        // Show the command that was typed, not the argument check in front
+        // of it. A hand-written function without the guard is shown whole.
+        let action = FUNCTION_GUARD_RE
+            .replace(body, "")
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        return Some(AliasEntry {
+            name,
+            action,
+            kind: AliasKind::Function,
+        });
+    }
     let caps = ALIAS_LINE_RE.captures(line)?;
     let name = caps.get(1)?.as_str().to_string();
     let action = caps
@@ -429,6 +488,49 @@ fn parse_alias_line(line: &str) -> Option<AliasEntry> {
 
 /// Quote an action for a bash `alias` line: double quotes by default (the
 /// spec format), single quotes when the action itself contains double quotes.
+/// How many positional parameters an action uses, or `None` when it uses
+/// none and can stay a plain alias.
+///
+/// Only `$1`..`$9` count. `$*` and `$@` are refused on purpose: they swallow
+/// whatever they are given, so there is no arity to check and a missing
+/// argument silently becomes an empty string. Numbered parameters have to
+/// start at `$1` and leave no gaps, since `$2` with no `$1` can only ever be
+/// a mistake.
+fn arg_arity(action: &str) -> Result<Option<usize>, String> {
+    if action.contains("$*") || action.contains("$@") {
+        return Err(
+            "use numbered arguments ($1, $2) rather than $* or $@, so am can check that they were \
+             given"
+                .into(),
+        );
+    }
+    let mut used = [false; 9];
+    for caps in ARG_PLACEHOLDER_RE.captures_iter(action) {
+        let n: usize = caps[1].parse().expect("regex matched a digit 1-9");
+        used[n - 1] = true;
+    }
+    let Some(highest) = used.iter().rposition(|seen| *seen) else {
+        return Ok(None);
+    };
+    if let Some(gap) = used[..=highest].iter().position(|seen| !seen) {
+        return Err(format!(
+            "'${}' is used but '${}' is not: numbered arguments must start at $1 with no gaps",
+            highest + 1,
+            gap + 1
+        ));
+    }
+    Ok(Some(highest + 1))
+}
+
+/// The check placed at the front of a generated function body, so calling it
+/// with too few arguments says so instead of running with empty ones.
+fn function_guard(name: &str, arity: usize) -> String {
+    let plural = if arity == 1 { "argument" } else { "arguments" };
+    format!(
+        "[ $# -ge {arity} ] || {{ echo \"am: {name} needs {arity} {plural}\" >&2; return 2; }}; "
+    )
+}
+
 fn quote_action(action: &str) -> Result<String> {
     if !action.contains('"') {
         Ok(format!("\"{action}\""))
@@ -442,6 +544,20 @@ fn quote_action(action: &str) -> Result<String> {
 }
 
 fn format_alias_line(entry: &AliasEntry) -> Result<String> {
+    if entry.kind == AliasKind::Function {
+        let arity = arg_arity(&entry.action)
+            .map_err(|msg| anyhow!(msg))?
+            .ok_or_else(|| anyhow!("a function alias must use at least one argument ($1)"))?;
+        // Unquoted, unlike an alias: a function body is parsed when the file
+        // is sourced and expanded when it is called, which is exactly what
+        // lets $1 still be the caller's argument.
+        return Ok(format!(
+            "{}() {{ {}{}; }} #function",
+            entry.name,
+            function_guard(&entry.name, arity),
+            entry.action
+        ));
+    }
     Ok(format!(
         "alias {}={} #{}",
         entry.name,
@@ -461,6 +577,15 @@ fn validate_action(action: &str) -> Result<(), String> {
     }
     if trimmed.chars().any(char::is_control) {
         return Err("the action cannot contain newlines or control characters".into());
+    }
+    // An action taking arguments becomes a function, which has different
+    // limits from an alias: no wrapping quotes to clash with, but a bare `#`
+    // would comment out the rest of the line including the type marker.
+    if arg_arity(trimmed)?.is_some() {
+        if trimmed.contains('#') {
+            return Err("an action taking arguments cannot contain '#'".into());
+        }
+        return Ok(());
     }
     if trimmed.contains('"') && trimmed.contains('\'') {
         return Err(
@@ -999,7 +1124,7 @@ fn cmd_new(home: &Path, alias_path: &Path, opts: NewOpts) -> Result<()> {
     };
 
     let action = match kind {
-        AliasKind::Command => {
+        AliasKind::Command | AliasKind::Function => {
             if !opts.rest.is_empty() {
                 let command = opts.rest.join(" ").trim().to_string();
                 validate_action(&command).map_err(|msg| anyhow!(msg))?;
@@ -1105,10 +1230,29 @@ fn cmd_new(home: &Path, alias_path: &Path, opts: NewOpts) -> Result<()> {
         }
     };
 
+    // An alias cannot see the arguments it is called with, so a command
+    // mentioning $1 has to be stored as a shell function instead. Detected
+    // rather than asked for: `am new -c gc 'git commit -m "$1"'` is what
+    // someone naturally types, and silently dropping the argument would be
+    // the worst outcome.
+    let arity = arg_arity(&action).map_err(|msg| anyhow!(msg))?;
+    let kind = match arity {
+        Some(_) if kind == AliasKind::Command => AliasKind::Function,
+        _ => kind,
+    };
+
     let entry = AliasEntry { name, action, kind };
     let line = format_alias_line(&entry)?;
     append_entry(alias_path, &entry)?;
     println!("Saved: {line}");
+    if let (AliasKind::Function, Some(arity)) = (kind, arity) {
+        let plural = if arity == 1 { "argument" } else { "arguments" };
+        println!(
+            "Saved as a shell function, because it takes {arity} {plural} — an alias cannot. \
+             Calling '{}' with fewer says so instead of running.",
+            entry.name
+        );
+    }
     println!("Run `source ~/{ALIAS_FILE_NAME}` to use it in this shell.");
     Ok(())
 }
@@ -1179,8 +1323,12 @@ fn cmd_delete(alias_path: &Path, name: Option<String>, yes: bool) -> Result<()> 
     }
     write_atomic(alias_path, &updated)?;
     println!("Deleted alias '{}' from ~/{ALIAS_FILE_NAME}.", target.name);
+    let undefine = match target.kind {
+        AliasKind::Function => "unset -f",
+        _ => "unalias",
+    };
     println!(
-        "Note: if '{0}' is active in an open shell, run `unalias {0}` there or start a new shell.",
+        "Note: if '{0}' is active in an open shell, run `{undefine} {0}` there or start a new shell.",
         target.name
     );
     Ok(())
@@ -1600,6 +1748,76 @@ mod tests {
         );
         assert!(parse_ssh_args(&v(&["forge@h", "x"])).is_err());
         assert!(parse_ssh_args(&v(&["a", "b", "c"])).is_err());
+    }
+
+    // -- functions (actions taking arguments) --
+
+    #[test]
+    fn arg_arity_counts_and_rejects() {
+        assert_eq!(arg_arity("git pull").unwrap(), None);
+        assert_eq!(arg_arity(r#"git commit -m "$1""#).unwrap(), Some(1));
+        assert_eq!(arg_arity(r#"git tag -a "$1" -m "$2""#).unwrap(), Some(2));
+        assert_eq!(arg_arity("echo ${1} ${2} ${3}").unwrap(), Some(3));
+        // repeats do not raise the count
+        assert_eq!(arg_arity(r#"cp "$1" "$1.bak""#).unwrap(), Some(1));
+
+        assert!(arg_arity(r#"echo "$2""#).is_err(), "$2 without $1");
+        assert!(arg_arity("echo $1 $3").is_err(), "gap at $2");
+        assert!(arg_arity(r#"echo "$*""#).is_err(), "$* has no arity");
+        assert!(arg_arity(r#"echo "$@""#).is_err(), "$@ has no arity");
+        // $0 and $10 are not argument placeholders
+        assert_eq!(arg_arity("echo $0").unwrap(), None);
+    }
+
+    #[test]
+    fn function_line_roundtrips_without_the_guard() {
+        let entry = entry("gc", r#"git commit -a -m "$1""#, AliasKind::Function);
+        let line = format_alias_line(&entry).unwrap();
+        assert!(line.starts_with("gc() { [ $# -ge 1 ] || "), "{line}");
+        assert!(
+            line.ends_with(r#"git commit -a -m "$1"; } #function"#),
+            "{line}"
+        );
+        // Reading it back yields the action as typed, guard stripped.
+        assert_eq!(parse_alias_line(&line), Some(entry));
+    }
+
+    #[test]
+    fn function_body_may_hold_both_quote_kinds() {
+        // Impossible for an alias, fine for a function: nothing wraps it.
+        let action = r#"echo "it's $1""#;
+        assert!(validate_action(action).is_ok());
+        let line = format_alias_line(&entry("q", action, AliasKind::Function)).unwrap();
+        assert_eq!(parse_alias_line(&line).unwrap().action, action);
+    }
+
+    #[test]
+    fn function_lines_are_deletable_and_leave_neighbours() {
+        let content = concat!(
+            "alias gp=\"git pull\" #command\n",
+            "gc() { [ $# -ge 1 ] || { echo \"am: gc needs 1 argument\" >&2; return 2; }; ",
+            "git commit -m \"$1\"; } #function\n",
+            "# a comment\n",
+        );
+        let (out, removed) = remove_entry_lines(content, "gc");
+        assert_eq!(removed, 1);
+        assert!(out.contains("alias gp="));
+        assert!(out.contains("# a comment"));
+        assert!(!out.contains("gc()"));
+    }
+
+    #[test]
+    fn hand_written_function_without_a_guard_still_parses() {
+        let parsed = parse_alias_line(r#"hi() { echo "hey $1"; } #function"#).unwrap();
+        assert_eq!(parsed.name, "hi");
+        assert_eq!(parsed.action, r#"echo "hey $1""#);
+        assert_eq!(parsed.kind, AliasKind::Function);
+    }
+
+    #[test]
+    fn action_with_arguments_rejects_a_hash() {
+        // A bare # would comment out the closing brace and the type marker.
+        assert!(validate_action(r#"echo "$1" # note"#).is_err());
     }
 
     // -- install helpers --
