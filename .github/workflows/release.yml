@@ -61,6 +61,10 @@ jobs:
       AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
       AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+      # How long to wait on Apple's notary queue. Minutes are normal, but the
+      # queue has no SLA and occasionally runs far longer. Override with the
+      # NOTARY_TIMEOUT repository variable.
+      NOTARY_TIMEOUT: ${{ vars.NOTARY_TIMEOUT || '45m' }}
     strategy:
       fail-fast: false
       matrix:
@@ -186,16 +190,37 @@ jobs:
       - name: Notarize the binary
         if: runner.os == 'macOS' && env.NOTARY_KEY != ''
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # notarytool takes .zip, .pkg or .dmg, so submit a zip of the
           # binary. What gets notarized is the signature inside it.
           ditto -c -k dist/am "$RUNNER_TEMP/notarize.zip"
+          log="$RUNNER_TEMP/notarize-binary.log"
+          status=0
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --key "$NOTARY_KEY" \
             --key-id "$AC_API_KEY_ID" \
             --issuer "$AC_API_ISSUER_ID" \
-            --wait --timeout 30m
+            --wait --timeout "$NOTARY_TIMEOUT" 2>&1 | tee "$log" || status=$?
           rm -f "$RUNNER_TEMP/notarize.zip"
+          id=$(grep -m1 -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' "$log" || true)
+
+          if [ "$status" -eq 0 ]; then
+            echo "Binary notarized."
+          elif [ "$status" -eq 124 ]; then
+            # Waiting timed out; the submission is still queued at Apple. The
+            # binary is signed either way, and its ticket is fetched online at
+            # first run, so it becomes valid once Apple finishes. Losing the
+            # whole release over a slow queue would be worse.
+            echo "::warning::Notarization did not finish within $NOTARY_TIMEOUT. Submission ${id:-unknown} is still processing; the signed binary ships regardless and becomes notarized when Apple completes it. Check with: xcrun notarytool info ${id:-<id>}"
+          else
+            # Anything else is a rejection or a credential problem, which
+            # shipping past would be dishonest.
+            echo "::error::Notarization failed (exit $status)."
+            [ -n "$id" ] && xcrun notarytool log "$id" \
+              --key "$NOTARY_KEY" --key-id "$AC_API_KEY_ID" \
+              --issuer "$AC_API_ISSUER_ID" || true
+            exit 1
+          fi
           # A lone executable has nowhere to store a notarization ticket, so
           # it cannot be stapled and Gatekeeper checks Apple online the first
           # time it runs. The .pkg below covers the offline case.
@@ -236,12 +261,25 @@ jobs:
       - name: Notarize and staple the installer package
         if: runner.os == 'macOS' && env.PKG != '' && env.NOTARY_KEY != ''
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          log="$RUNNER_TEMP/notarize-pkg.log"
+          status=0
           xcrun notarytool submit "$PKG" \
             --key "$NOTARY_KEY" \
             --key-id "$AC_API_KEY_ID" \
             --issuer "$AC_API_ISSUER_ID" \
-            --wait --timeout 30m
+            --wait --timeout "$NOTARY_TIMEOUT" 2>&1 | tee "$log" || status=$?
+          id=$(grep -m1 -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' "$log" || true)
+
+          if [ "$status" -ne 0 ]; then
+            # Unlike the binary, an unstapled .pkg has no fallback worth
+            # shipping, so drop it and let the release go out without one.
+            echo "::warning::Notarization of $PKG did not complete (exit $status, submission ${id:-unknown}); leaving the .pkg out of this release. The binaries and tarballs are unaffected."
+            rm -f "$PKG"
+            echo "PKG=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           xcrun stapler staple "$PKG"
           xcrun stapler validate "$PKG"
           # Confirms Gatekeeper accepts the installer as distributed.

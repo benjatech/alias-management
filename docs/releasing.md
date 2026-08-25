@@ -151,9 +151,18 @@ Watch the run. Useful things to know when it goes wrong:
   exported without its private key. Re-export from *My Certificates*.
 - **`No Developer ID Installer certificate found`** — only a notice. The
   release continues without the `.pkg`.
-- **Notarization rejected** — `xcrun notarytool log <submission-id>` prints
-  Apple's reason. The usual cause is a missing hardened runtime, which the
-  workflow sets with `--options runtime`.
+- **Notarization rejected** — the workflow prints Apple's reason with
+  `xcrun notarytool log` and fails the build. The usual cause is a missing
+  hardened runtime, which the workflow sets with `--options runtime`.
+- **Notarization timed out** — Apple's notary queue has no SLA. Minutes are
+  normal, but it occasionally runs far longer, and a slow queue must not cost
+  you the release. Waiting stops after `NOTARY_TIMEOUT` (45 minutes by
+  default; override with a repository variable of that name) and then:
+  the signed binaries and tarballs still ship, with a warning naming the
+  submission id, because a notarization ticket is fetched online at first run
+  and so takes effect whenever Apple finishes; the `.pkg` is dropped from the
+  release instead, since an unstapled installer has no such fallback.
+  `xcrun notarytool info <submission-id>` says where a submission got to.
 - **Signing runs on every build, notarization only on tags.** A certificate
   problem surfaces in a pull request; an Apple-side problem will not.
 
