@@ -32,7 +32,13 @@ It manages three kinds of aliases:
 ### Option 1 — Homebrew (macOS and Linux)
 
 ```bash
-brew tap benjatech/tap
+brew install benjatech/alias-management/am
+```
+
+That taps and installs in one step. The two-step form works too:
+
+```bash
+brew tap benjatech/alias-management
 brew install am
 ```
 
@@ -345,10 +351,15 @@ the new tarballs and their checksums. It needs one more secret:
 |---|---|
 | `HOMEBREW_TAP_TOKEN` | A token with `contents: write` on the tap repository |
 
-The tap defaults to `benjatech/homebrew-tap` (so `brew tap benjatech/tap`
-works); set the `HOMEBREW_TAP_REPO` repository *variable* to point elsewhere.
-Create that repository with a `Formula/` directory before the first tagged
-release — the job is skipped entirely while `HOMEBREW_TAP_TOKEN` is unset.
+The tap defaults to the `benjatech/homebrew-alias-management` repository.
+Homebrew requires the `homebrew-` prefix and drops it in the tap name, which
+is why that repository is tapped as `benjatech/alias-management`. It has to be
+a separate repository from this one; set the `HOMEBREW_TAP_REPO` repository
+*variable* to point somewhere else, for example a shared `homebrew-tap` if you
+later publish more than one tool.
+
+Create it with a `Formula/` directory before the first tagged release — the
+job is skipped entirely while `HOMEBREW_TAP_TOKEN` is unset.
 
 ## Behavior notes and limitations
 

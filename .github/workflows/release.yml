@@ -295,7 +295,9 @@ jobs:
     # no-op until you opt in.
     env:
       TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'benjatech/homebrew-tap' }}
+      # `brew tap benjatech/alias-management` resolves to this repository:
+      # Homebrew requires the `homebrew-` prefix and strips it in the tap name.
+      TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'benjatech/homebrew-alias-management' }}
     steps:
       - uses: actions/checkout@v4
         if: env.TAP_TOKEN != ''
