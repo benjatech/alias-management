@@ -2,9 +2,8 @@
 //!
 //! Aliases live in `~/.alias-management` (plain bash, one alias per line with
 //! a trailing `#command` / `#folder` / `#ssh` marker). A marker-delimited
-//! block in `~/.bash_profile` sources that file and wraps `am` in a shell
-//! function that re-sources it after every run, so changes apply to the
-//! active shell immediately.
+//! block in `~/.bash_profile` sources that file when a shell starts, so
+//! managed aliases are available in every new shell.
 
 use std::env;
 use std::fs;
@@ -46,17 +45,8 @@ const PROFILE_MARKER_BEGIN: &str = "# >>> alias-management (am) >>>";
 
 const PROFILE_BLOCK: &str = r#"# >>> alias-management (am) >>>
 # Added by `am` (alias-management). Do not edit this block by hand.
-# Loads managed aliases and re-sources them after every `am` run so
-# changes take effect in the current shell immediately.
+# Loads the managed aliases when the shell starts.
 [ -f "$HOME/.alias-management" ] && source "$HOME/.alias-management"
-am() {
-    command am "$@"
-    local am_status=$?
-    if [ -f "$HOME/.alias-management" ]; then
-        source "$HOME/.alias-management"
-    fi
-    return $am_status
-}
 # <<< alias-management (am) <<<
 "#;
 
@@ -104,9 +94,8 @@ static NAME_RE: LazyLock<Regex> =
 ~/.alias-management. It never touches aliases defined anywhere else.\n\n\
 On every run it makes sure ~/.alias-management exists and that a small, \
 marker-delimited integration block is present in ~/.bash_profile. That block \
-sources your managed aliases and wraps `am` in a shell function which \
-re-sources the file after every `am` command, so aliases created with \
-`am new` work in the current shell immediately.\n\n\
+sources your managed aliases when a shell starts. After creating an alias, \
+run `source ~/.alias-management` to use it in the shell you are in.\n\n\
 Aliases are stored as plain bash with a trailing type marker:\n    \
 alias gp=\"git pull\" #command\n    \
 alias p=\"cd ~/folder/personal\" #folder\n    \
@@ -680,9 +669,8 @@ fn cmd_install(home: &Path, dir: Option<PathBuf>) -> Result<()> {
                         Err(_) => target.display().to_string(),
                     };
                     println!(
-                        "Note: {} is not on your PATH yet, so the terminal (and the am shell \
-                         wrapper) cannot find it. Add this line to ~/{PROFILE_FILE_NAME} and \
-                         restart your shell:",
+                        "Note: {} is not on your PATH yet, so the terminal cannot find \
+                         it. Add this line to ~/{PROFILE_FILE_NAME} and restart your shell:",
                         target.display()
                     );
                     println!("  export PATH=\"{shown}:$PATH\"");
@@ -1121,9 +1109,7 @@ fn cmd_new(home: &Path, alias_path: &Path, opts: NewOpts) -> Result<()> {
     let line = format_alias_line(&entry)?;
     append_entry(alias_path, &entry)?;
     println!("Saved: {line}");
-    println!(
-        "It is live in this shell already if the am wrapper is installed; new shells always pick it up."
-    );
+    println!("Run `source ~/{ALIAS_FILE_NAME}` to use it in this shell.");
     Ok(())
 }
 
@@ -1419,6 +1405,10 @@ mod tests {
                 .ends_with("# <<< alias-management (am) <<<")
         );
         assert!(PROFILE_BLOCK.ends_with('\n'));
+        // Sourcing the alias file is all the block does: no `am` wrapper
+        // function, so nothing shadows the binary found on PATH.
+        assert!(PROFILE_BLOCK.contains(r#"source "$HOME/.alias-management""#));
+        assert!(!PROFILE_BLOCK.contains("am()"));
     }
 
     #[test]

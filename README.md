@@ -29,7 +29,25 @@ It manages three kinds of aliases:
 
 ## Install
 
-### Option 1 — just download the `am` file and put it in your bin folder
+### Option 1 — Homebrew (macOS and Linux)
+
+```bash
+brew install benjatech/alias-management/am
+```
+
+That taps and installs in one step. The two-step form works too:
+
+```bash
+brew tap benjatech/alias-management
+brew install am
+```
+
+`brew upgrade am` later picks up new releases. The formula installs the
+prebuilt binary for your platform, so there is nothing to compile. Homebrew
+downloads with curl, which never sets the macOS quarantine flag, so
+Gatekeeper stays out of the way.
+
+### Option 2 — download the `am` file and put it in your bin folder
 
 `am` is a single self-contained executable — no runtime, no libraries, no
 config. Grab the file for your platform from the
@@ -57,12 +75,17 @@ sudo cp am /usr/local/bin/ && sudo chmod +x /usr/local/bin/am
 mkdir -p ~/.local/bin && cp am ~/.local/bin/ && chmod +x ~/.local/bin/am
 ```
 
+On macOS the release also carries a signed, notarized `.pkg` installer
+(`am-macos-arm64.pkg`) that puts `am` in `/usr/local/bin` with no Gatekeeper
+friction at all — double-click it, or `sudo installer -pkg am-macos-arm64.pkg
+-target /`.
+
 The binary must match your OS and CPU: use a Linux build on Linux and a
 macOS build on a Mac (and mind x86_64 vs arm64). On macOS, if Gatekeeper
 blocks a downloaded binary, clear the quarantine flag with
 `xattr -d com.apple.quarantine /usr/local/bin/am`.
 
-### Option 2 — build from source
+### Option 3 — build from source
 
 With Rust 1.85+ installed:
 
@@ -119,8 +142,9 @@ Everything is asked interactively:
    - *ssh*: the user and the host. User `forge` and host `127.0.0.1`
      become the command `ssh forge@127.0.0.1`.
 
-The alias is appended to `~/.alias-management` and — thanks to the shell
-integration — works in the current shell immediately.
+The alias is appended to `~/.alias-management`, and `am` reminds you to run
+`source ~/.alias-management` to use it in the shell you are standing in. New
+shells pick it up on their own.
 
 **In a hurry?** Give any part up front with `-f` (folder), `-c` (command)
 or `-s` (ssh) — am only asks for what is missing:
@@ -184,30 +208,29 @@ am install --help
 
 ## How the shell integration works
 
-A child process cannot change the shell that launched it, so the `am`
-binary alone could never make a new alias appear in your open terminal.
-Setup therefore installs this block into `~/.bash_profile`:
+Setup installs this block into `~/.bash_profile`:
 
 ```bash
 # >>> alias-management (am) >>>
 # Added by `am` (alias-management). Do not edit this block by hand.
-# Loads managed aliases and re-sources them after every `am` run so
-# changes take effect in the current shell immediately.
+# Loads the managed aliases when the shell starts.
 [ -f "$HOME/.alias-management" ] && source "$HOME/.alias-management"
-am() {
-    command am "$@"
-    local am_status=$?
-    if [ -f "$HOME/.alias-management" ]; then
-        source "$HOME/.alias-management"
-    fi
-    return $am_status
-}
 # <<< alias-management (am) <<<
 ```
 
-It sources your aliases when the shell starts, and wraps `am` in a function
-that re-sources them right after every `am` command — that is what makes
-`am new` take effect instantly.
+That is the whole integration: it sources your aliases when the shell starts,
+so every new shell has them.
+
+A child process cannot change the shell that launched it, so the `am` binary
+cannot make a brand-new alias appear in the terminal you are already in — only
+that shell can load it. After `am new`, run:
+
+```bash
+source ~/.alias-management
+```
+
+`am new` prints this reminder itself. `am` defines no shell function, so
+`which am` reports the binary on your `PATH` and nothing shadows it.
 
 If `am` has to create `~/.bash_profile` from scratch, it also adds a line
 sourcing `~/.profile` first: bash reads only the first of `~/.bash_profile`
@@ -269,6 +292,74 @@ Two GitHub Actions workflows live in `.github/workflows/`:
   the matching `v` prefix. Tags with a suffix (`v0.1.0-rc.1`) are
   published as prereleases, and re-pushing an existing tag refreshes that
   release's files instead of failing.
+
+Each platform ships twice: the bare binary (`am-macos-arm64`) for a direct
+download, and a `.tar.gz` of the same file for Homebrew. `SHA256SUMS` covers
+both.
+
+### Signing the macOS builds
+
+macOS binaries are signed with a Developer ID certificate and notarized when
+these repository secrets exist. Without them the workflow still succeeds and
+publishes unsigned binaries, so forks and pull requests are unaffected.
+
+| Secret | What it is |
+|---|---|
+| `MACOS_CERT_P12` | Base64 of your *Developer ID Application* certificate and private key, exported from Keychain Access as `.p12` |
+| `MACOS_CERT_PASSWORD` | The password you set on that `.p12` |
+| `AC_API_KEY_P8` | Base64 of an App Store Connect API key (`AuthKey_XXX.p8`) |
+| `AC_API_KEY_ID` | That key's ID |
+| `AC_API_ISSUER_ID` | The issuer ID from App Store Connect |
+| `MACOS_INSTALLER_CERT_P12` | Base64 of your *Developer ID Installer* certificate, if it is not already inside `MACOS_CERT_P12` |
+| `MACOS_INSTALLER_CERT_PASSWORD` | The password on that `.p12` |
+
+[docs/releasing.md](docs/releasing.md) walks through obtaining each one. The
+signing identity is looked up in the keychain automatically; set the optional
+`MACOS_SIGNING_IDENTITY` secret to pin a specific one.
+
+This matters for people who download from the Releases page: a browser tags
+the file with `com.apple.quarantine`, and Gatekeeper refuses to run an
+unsigned quarantined binary. It does **not** matter for Homebrew, which
+downloads with curl and never sets that flag.
+
+Signing runs on every build, so a bad certificate shows up in review.
+Notarization calls out to Apple and takes minutes, so it runs on tags only.
+
+Two things get notarized, because they are distributed separately:
+
+- **The binary itself**, submitted as a zip. A lone executable has nowhere
+  to keep a notarization ticket, so it cannot be stapled — Gatekeeper
+  checks with Apple online the first time it runs, which needs a network
+  connection.
+- **A `.pkg` installer** (`am-macos-arm64.pkg`), built with `pkgbuild` and
+  signed with a *Developer ID Installer* certificate, which is a different
+  certificate from the one that signs the binary. A `.pkg` can carry its
+  ticket, so this one is stapled and verifies with no network at all. It
+  installs `am` into `/usr/local/bin`, and files placed by an installer are
+  never quarantined.
+
+The `.pkg` is built whenever a Developer ID Installer certificate is in the
+keychain and skipped with a notice when it is not, so the rest of the
+release is unaffected if you only have the Application certificate.
+
+### The Homebrew tap
+
+Tagging also regenerates the formula in the tap repository, pointing it at
+the new tarballs and their checksums. It needs one more secret:
+
+| Secret | What it is |
+|---|---|
+| `HOMEBREW_TAP_TOKEN` | A token with `contents: write` on the tap repository |
+
+The tap defaults to the `benjatech/homebrew-alias-management` repository.
+Homebrew requires the `homebrew-` prefix and drops it in the tap name, which
+is why that repository is tapped as `benjatech/alias-management`. It has to be
+a separate repository from this one; set the `HOMEBREW_TAP_REPO` repository
+*variable* to point somewhere else, for example a shared `homebrew-tap` if you
+later publish more than one tool.
+
+Create it with a `Formula/` directory before the first tagged release — the
+job is skipped entirely while `HOMEBREW_TAP_TOKEN` is unset.
 
 ## Behavior notes and limitations
 
