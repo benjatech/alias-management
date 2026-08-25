@@ -151,6 +151,12 @@ Watch the run. Useful things to know when it goes wrong:
   exported without its private key. Re-export from *My Certificates*.
 - **`No Developer ID Installer certificate found`** — only a notice. The
   release continues without the `.pkg`.
+- **The `.pkg` step hangs** — `pkgbuild` is asking for a keychain password
+  that a runner cannot answer. Every tool that touches the private key has to
+  be named with `-T` when the certificate is imported; the workflow lists
+  `codesign`, `pkgbuild`, `productbuild` and `productsign`. The step is capped
+  at ten minutes and allowed to fail, so a hang costs the `.pkg` and nothing
+  else.
 - **Notarization rejected** — the workflow prints Apple's reason with
   `xcrun notarytool log` and fails the build. The usual cause is a missing
   hardened runtime, which the workflow sets with `--options runtime`.

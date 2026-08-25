@@ -50,6 +50,9 @@ jobs:
     name: Build ${{ matrix.artifact }}
     needs: verify
     runs-on: ${{ matrix.os }}
+    # Generous next to a slow notary queue, far below the 6-hour default
+    # that let a stuck step run all morning.
+    timeout-minutes: 120
     # Job-level env so the `if:` on each signing step can test whether the
     # secrets exist. Secrets are empty strings on forks and pull requests.
     env:
@@ -127,8 +130,13 @@ jobs:
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          # Every tool that will touch the private key must be named here.
+          # pkgbuild missing from this list does not fail — it waits forever
+          # on a password prompt that a headless runner can never answer.
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+            -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/pkgbuild \
+            -T /usr/bin/productbuild -T /usr/bin/productsign
           # A separate Developer ID *Installer* certificate signs the .pkg.
           # Skip this when both certificates live in the same .p12.
           if [ -n "$MACOS_INSTALLER_CERT_P12" ]; then
@@ -227,6 +235,10 @@ jobs:
 
       - name: Build and sign the installer package
         if: runner.os == 'macOS' && env.MACOS_CERT_P12 != ''
+        # The .pkg is a bonus artifact, so it gets a short leash and is
+        # allowed to fail: the binaries, tarballs and release still go out.
+        timeout-minutes: 10
+        continue-on-error: true
         run: |
           set -euo pipefail
           # Installer identities are not codesigning identities, so they may
