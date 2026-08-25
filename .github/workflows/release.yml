@@ -9,6 +9,11 @@ name: Release
 # release build is caught in review rather than at tagging time. Pull
 # requests only build (the binaries are attached to the run as downloadable
 # artifacts); publishing a release happens on tags alone.
+#
+# macOS builds are signed with a Developer ID certificate and notarized when
+# the signing secrets are configured; see "Signing the macOS builds" in the
+# README. Without those secrets the build still succeeds and simply produces
+# unsigned binaries, so forks and pull requests are unaffected.
 
 on:
   push:
@@ -45,6 +50,15 @@ jobs:
     name: Build ${{ matrix.artifact }}
     needs: verify
     runs-on: ${{ matrix.os }}
+    # Job-level env so the `if:` on each signing step can test whether the
+    # secrets exist. Secrets are empty strings on forks and pull requests.
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -86,16 +100,93 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Stage artifact
+      - name: Stage binary
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/am" "dist/${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/am" dist/am
+
+      # Signing happens before packaging so both the tarball and the bare
+      # binary carry the signature. The signature lives inside the Mach-O
+      # file, so copying and archiving preserve it.
+      - name: Import Developer ID certificate
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          # Random password: this keychain lives and dies with the runner.
+          keychain_password="$(uuidgen)"
+          echo "KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
+
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          # Lets codesign use the key without an interactive prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          # Referring to the identity by its SHA-1 is unambiguous even when
+          # the keychain holds several certificates. MACOS_SIGNING_IDENTITY
+          # overrides the lookup when it is set.
+          identity="$MACOS_SIGNING_IDENTITY"
+          if [ -z "$identity" ]; then
+            identity=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+              | awk '/Developer ID Application/ { print $2; exit }')
+          fi
+          if [ -z "$identity" ]; then
+            echo "::error::No Developer ID Application identity in the keychain."
+            exit 1
+          fi
+          # --options runtime (the hardened runtime) and a secure timestamp
+          # are both required for notarization to succeed.
+          codesign --force --options runtime --timestamp --sign "$identity" dist/am
+          codesign --verify --strict --verbose=2 dist/am
+
+      - name: Notarize
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != '' && env.AC_API_KEY_P8 != ''
+        run: |
+          set -euo pipefail
+          printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac-api-key.p8"
+          # notarytool takes .zip, .pkg or .dmg, so submit a zip of the
+          # binary. What gets notarized is the signature inside it.
+          ditto -c -k dist/am "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/ac-api-key.p8" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$RUNNER_TEMP/ac-api-key.p8" "$RUNNER_TEMP/notarize.zip"
+          # A lone executable has nowhere to store a notarization ticket, so
+          # it cannot be stapled: Gatekeeper checks Apple online on first run.
+          # Ship a signed .pkg instead if offline verification matters.
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          # COPYFILE_DISABLE stops bsdtar on macOS from adding ._ metadata
+          # files next to the binary inside the archive.
+          COPYFILE_DISABLE=1 tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C dist am
+          mv dist/am "dist/${{ matrix.artifact }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
+
+      - name: Remove signing keychain
+        if: always() && runner.os == 'macOS' && env.KEYCHAIN_PATH != ''
+        run: security delete-keychain "$KEYCHAIN_PATH" || true
 
   release:
     name: Publish GitHub release
@@ -131,4 +222,94 @@ jobs:
               --repo "$REPO" \
               --title "am $TAG" \
               --generate-notes $extra
+          fi
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # Every step is skipped when no tap token is configured, so the job is a
+    # no-op until you opt in.
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'benjatech/homebrew-tap' }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.TAP_TOKEN != ''
+
+      - uses: actions/download-artifact@v4
+        if: env.TAP_TOKEN != ''
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Render and push the formula
+        if: env.TAP_TOKEN != ''
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          base="https://github.com/$REPO/releases/download/$TAG"
+          sha() { sha256sum "dist/$1.tar.gz" | cut -d' ' -f1; }
+
+          # `brew audit` wants a license. Guessing one would be worse than
+          # leaving it out, so the line appears only once Cargo.toml has it.
+          license=$(grep -m1 '^license = ' Cargo.toml | cut -d'"' -f2 || true)
+          if [ -z "$license" ]; then
+            echo "::warning::No license field in Cargo.toml, so the formula omits it and \`brew audit\` will object."
+          fi
+
+          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/$TAP_REPO" tap
+          mkdir -p tap/Formula
+
+          {
+            echo "# Generated by the release workflow in $REPO. Do not edit by hand."
+            echo "class Am < Formula"
+            echo "  desc \"Manage personal bash aliases stored in ~/.alias-management\""
+            echo "  homepage \"https://github.com/$REPO\""
+            echo "  version \"$version\""
+            [ -n "$license" ] && echo "  license \"$license\""
+            cat <<FORMULA
+
+            on_macos do
+              on_arm do
+                url "$base/am-macos-arm64.tar.gz"
+                sha256 "$(sha am-macos-arm64)"
+              end
+              on_intel do
+                url "$base/am-macos-x86_64.tar.gz"
+                sha256 "$(sha am-macos-x86_64)"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "$base/am-linux-x86_64.tar.gz"
+                sha256 "$(sha am-linux-x86_64)"
+              end
+            end
+
+            def install
+              bin.install "am"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/am --version")
+            end
+          end
+          FORMULA
+          } > tap/Formula/am.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/am.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date."
+          else
+            git commit -m "am $version"
+            git push
           fi

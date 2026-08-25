@@ -3,6 +3,8 @@ name = "alias-management"
 version = "0.0.1"
 edition = "2024"
 description = "am - manage personal bash aliases stored in ~/.alias-management"
+license = "MIT"
+repository = "https://github.com/benjatech/alias-management"
 
 [[bin]]
 name = "am"

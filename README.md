@@ -29,7 +29,19 @@ It manages three kinds of aliases:
 
 ## Install
 
-### Option 1 — just download the `am` file and put it in your bin folder
+### Option 1 — Homebrew (macOS and Linux)
+
+```bash
+brew tap benjatech/tap
+brew install am
+```
+
+`brew upgrade am` later picks up new releases. The formula installs the
+prebuilt binary for your platform, so there is nothing to compile. Homebrew
+downloads with curl, which never sets the macOS quarantine flag, so
+Gatekeeper stays out of the way.
+
+### Option 2 — download the `am` file and put it in your bin folder
 
 `am` is a single self-contained executable — no runtime, no libraries, no
 config. Grab the file for your platform from the
@@ -62,7 +74,7 @@ macOS build on a Mac (and mind x86_64 vs arm64). On macOS, if Gatekeeper
 blocks a downloaded binary, clear the quarantine flag with
 `xattr -d com.apple.quarantine /usr/local/bin/am`.
 
-### Option 2 — build from source
+### Option 3 — build from source
 
 With Rust 1.85+ installed:
 
@@ -269,6 +281,52 @@ Two GitHub Actions workflows live in `.github/workflows/`:
   the matching `v` prefix. Tags with a suffix (`v0.1.0-rc.1`) are
   published as prereleases, and re-pushing an existing tag refreshes that
   release's files instead of failing.
+
+Each platform ships twice: the bare binary (`am-macos-arm64`) for a direct
+download, and a `.tar.gz` of the same file for Homebrew. `SHA256SUMS` covers
+both.
+
+### Signing the macOS builds
+
+macOS binaries are signed with a Developer ID certificate and notarized when
+these repository secrets exist. Without them the workflow still succeeds and
+publishes unsigned binaries, so forks and pull requests are unaffected.
+
+| Secret | What it is |
+|---|---|
+| `MACOS_CERT_P12` | Base64 of your *Developer ID Application* certificate and private key, exported from Keychain Access as `.p12` |
+| `MACOS_CERT_PASSWORD` | The password you set on that `.p12` |
+| `AC_API_KEY_P8` | Base64 of an App Store Connect API key (`AuthKey_XXX.p8`) |
+| `AC_API_KEY_ID` | That key's ID |
+| `AC_API_ISSUER_ID` | The issuer ID from App Store Connect |
+
+Base64-encode the two files with `base64 -i cert.p12 | pbcopy`. The signing
+identity is looked up in the keychain automatically; set the optional
+`MACOS_SIGNING_IDENTITY` secret to pin a specific one.
+
+This matters for people who download from the Releases page: a browser tags
+the file with `com.apple.quarantine`, and Gatekeeper refuses to run an
+unsigned quarantined binary. It does **not** matter for Homebrew, which
+downloads with curl and never sets that flag.
+
+One limitation: a lone executable has nowhere to store a notarization
+ticket, so it cannot be stapled and Gatekeeper verifies it against Apple
+online the first time it runs. Distribute a signed `.pkg` instead if
+first-run-offline has to work.
+
+### The Homebrew tap
+
+Tagging also regenerates the formula in the tap repository, pointing it at
+the new tarballs and their checksums. It needs one more secret:
+
+| Secret | What it is |
+|---|---|
+| `HOMEBREW_TAP_TOKEN` | A token with `contents: write` on the tap repository |
+
+The tap defaults to `benjatech/homebrew-tap` (so `brew tap benjatech/tap`
+works); set the `HOMEBREW_TAP_REPO` repository *variable* to point elsewhere.
+Create that repository with a `Formula/` directory before the first tagged
+release — the job is skipped entirely while `HOMEBREW_TAP_TOKEN` is unset.
 
 ## Behavior notes and limitations
 
