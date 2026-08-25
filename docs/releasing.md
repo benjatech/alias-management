@@ -18,6 +18,16 @@ alone. Add the secrets when you want signed downloads and `brew install`.
 Add them under **Settings → Secrets and variables → Actions → New repository
 secret** on `benjatech/alias-management`, or with the `gh` CLI as shown.
 
+They have to be **repository** secrets, not **environment** secrets: only a
+job declaring `environment:` can read an environment secret, and no job here
+does. Putting them in an environment fails quietly — every signing step is
+skipped when its secret is empty, so the release goes out green and unsigned.
+
+To keep the signing identity away from pull requests entirely, put them in an
+environment restricted to tag refs and add `environment:` to the build job.
+That is stricter, at the cost of no longer catching a bad certificate during
+review.
+
 ### Apple signing certificates
 
 Both need a paid Apple Developer Program membership, and only the Account
