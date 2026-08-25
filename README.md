@@ -69,6 +69,11 @@ sudo cp am /usr/local/bin/ && sudo chmod +x /usr/local/bin/am
 mkdir -p ~/.local/bin && cp am ~/.local/bin/ && chmod +x ~/.local/bin/am
 ```
 
+On macOS the release also carries a signed, notarized `.pkg` installer
+(`am-macos-arm64.pkg`) that puts `am` in `/usr/local/bin` with no Gatekeeper
+friction at all — double-click it, or `sudo installer -pkg am-macos-arm64.pkg
+-target /`.
+
 The binary must match your OS and CPU: use a Linux build on Linux and a
 macOS build on a Mac (and mind x86_64 vs arm64). On macOS, if Gatekeeper
 blocks a downloaded binary, clear the quarantine flag with
@@ -299,6 +304,8 @@ publishes unsigned binaries, so forks and pull requests are unaffected.
 | `AC_API_KEY_P8` | Base64 of an App Store Connect API key (`AuthKey_XXX.p8`) |
 | `AC_API_KEY_ID` | That key's ID |
 | `AC_API_ISSUER_ID` | The issuer ID from App Store Connect |
+| `MACOS_INSTALLER_CERT_P12` | Base64 of your *Developer ID Installer* certificate, if it is not already inside `MACOS_CERT_P12` |
+| `MACOS_INSTALLER_CERT_PASSWORD` | The password on that `.p12` |
 
 Base64-encode the two files with `base64 -i cert.p12 | pbcopy`. The signing
 identity is looked up in the keychain automatically; set the optional
@@ -309,10 +316,25 @@ the file with `com.apple.quarantine`, and Gatekeeper refuses to run an
 unsigned quarantined binary. It does **not** matter for Homebrew, which
 downloads with curl and never sets that flag.
 
-One limitation: a lone executable has nowhere to store a notarization
-ticket, so it cannot be stapled and Gatekeeper verifies it against Apple
-online the first time it runs. Distribute a signed `.pkg` instead if
-first-run-offline has to work.
+Signing runs on every build, so a bad certificate shows up in review.
+Notarization calls out to Apple and takes minutes, so it runs on tags only.
+
+Two things get notarized, because they are distributed separately:
+
+- **The binary itself**, submitted as a zip. A lone executable has nowhere
+  to keep a notarization ticket, so it cannot be stapled — Gatekeeper
+  checks with Apple online the first time it runs, which needs a network
+  connection.
+- **A `.pkg` installer** (`am-macos-arm64.pkg`), built with `pkgbuild` and
+  signed with a *Developer ID Installer* certificate, which is a different
+  certificate from the one that signs the binary. A `.pkg` can carry its
+  ticket, so this one is stapled and verifies with no network at all. It
+  installs `am` into `/usr/local/bin`, and files placed by an installer are
+  never quarantined.
+
+The `.pkg` is built whenever a Developer ID Installer certificate is in the
+keychain and skipped with a notice when it is not, so the rest of the
+release is unaffected if you only have the Application certificate.
 
 ### The Homebrew tap
 

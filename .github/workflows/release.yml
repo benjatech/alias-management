@@ -56,6 +56,8 @@ jobs:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
       MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      MACOS_INSTALLER_CERT_P12: ${{ secrets.MACOS_INSTALLER_CERT_P12 }}
+      MACOS_INSTALLER_CERT_PASSWORD: ${{ secrets.MACOS_INSTALLER_CERT_PASSWORD }}
       AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
       AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
@@ -123,7 +125,15 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain"
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
             -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          # Lets codesign use the key without an interactive prompt.
+          # A separate Developer ID *Installer* certificate signs the .pkg.
+          # Skip this when both certificates live in the same .p12.
+          if [ -n "$MACOS_INSTALLER_CERT_P12" ]; then
+            printf '%s' "$MACOS_INSTALLER_CERT_P12" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+            security import "$RUNNER_TEMP/installer.p12" -k "$keychain" \
+              -P "$MACOS_INSTALLER_CERT_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/pkgbuild
+            rm -f "$RUNNER_TEMP/installer.p12"
+          fi
+          # Lets the signing tools use the keys without an interactive prompt.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$keychain_password" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" login.keychain-db
@@ -150,8 +160,11 @@ jobs:
           codesign --force --options runtime --timestamp --sign "$identity" dist/am
           codesign --verify --strict --verbose=2 dist/am
 
-      - name: Notarize
-        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != '' && env.AC_API_KEY_P8 != ''
+      # Notarization calls out to Apple and takes minutes, so it runs for
+      # tags only. Pull requests still sign, which catches certificate
+      # problems without queueing a submission on every push.
+      - name: Notarize the binary
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.MACOS_CERT_P12 != '' && env.AC_API_KEY_P8 != ''
         run: |
           set -euo pipefail
           printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac-api-key.p8"
@@ -165,8 +178,57 @@ jobs:
             --wait --timeout 30m
           rm -f "$RUNNER_TEMP/ac-api-key.p8" "$RUNNER_TEMP/notarize.zip"
           # A lone executable has nowhere to store a notarization ticket, so
-          # it cannot be stapled: Gatekeeper checks Apple online on first run.
-          # Ship a signed .pkg instead if offline verification matters.
+          # it cannot be stapled and Gatekeeper checks Apple online the first
+          # time it runs. The .pkg below covers the offline case.
+
+      - name: Build and sign the installer package
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          # Installer identities are not codesigning identities, so they may
+          # not show up under the default policy.
+          find_installer() {
+            security find-identity -v "$KEYCHAIN_PATH" \
+              | awk '/Developer ID Installer/ { print $2; exit }'
+          }
+          identity=$(find_installer)
+          if [ -z "$identity" ]; then
+            identity=$(security find-identity -v -p basic "$KEYCHAIN_PATH" \
+              | awk '/Developer ID Installer/ { print $2; exit }')
+          fi
+          if [ -z "$identity" ]; then
+            echo "::notice::No Developer ID Installer certificate found; skipping the .pkg."
+            exit 0
+          fi
+          # Cargo.toml rather than the tag: pull-request runs have no tag, and
+          # the verify job already proves the two agree on a tag push.
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          pkg="dist/${{ matrix.artifact }}.pkg"
+          mkdir -p pkgroot
+          install -m 755 dist/am pkgroot/am
+          pkgbuild --root pkgroot --install-location /usr/local/bin \
+            --identifier com.benjatech.am --version "$version" \
+            --sign "$identity" "$pkg"
+          pkgutil --check-signature "$pkg"
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
+
+      # Unlike a bare executable, a .pkg can carry its notarization ticket,
+      # so stapling makes it verify without a network round trip.
+      - name: Notarize and staple the installer package
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.PKG != '' && env.AC_API_KEY_P8 != ''
+        run: |
+          set -euo pipefail
+          printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac-api-key.p8"
+          xcrun notarytool submit "$PKG" \
+            --key "$RUNNER_TEMP/ac-api-key.p8" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$RUNNER_TEMP/ac-api-key.p8"
+          xcrun stapler staple "$PKG"
+          xcrun stapler validate "$PKG"
+          # Confirms Gatekeeper accepts the installer as distributed.
+          spctl --assess --type install -vvv "$PKG"
 
       - name: Package
         run: |
@@ -179,9 +241,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist/${{ matrix.artifact }}
-            dist/${{ matrix.artifact }}.tar.gz
+          # A glob because the .pkg only exists when the macOS signing
+          # secrets are configured.
+          path: dist/*
           if-no-files-found: error
 
       - name: Remove signing keychain
