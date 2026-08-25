@@ -313,8 +313,8 @@ publishes unsigned binaries, so forks and pull requests are unaffected.
 | `MACOS_INSTALLER_CERT_P12` | Base64 of your *Developer ID Installer* certificate, if it is not already inside `MACOS_CERT_P12` |
 | `MACOS_INSTALLER_CERT_PASSWORD` | The password on that `.p12` |
 
-Base64-encode the two files with `base64 -i cert.p12 | pbcopy`. The signing
-identity is looked up in the keychain automatically; set the optional
+[docs/releasing.md](docs/releasing.md) walks through obtaining each one. The
+signing identity is looked up in the keychain automatically; set the optional
 `MACOS_SIGNING_IDENTITY` secret to pin a specific one.
 
 This matters for people who download from the Releases page: a browser tags

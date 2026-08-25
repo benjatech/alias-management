@@ -119,7 +119,7 @@ jobs:
           keychain_password="$(uuidgen)"
           echo "KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
 
-          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
@@ -128,7 +128,7 @@ jobs:
           # A separate Developer ID *Installer* certificate signs the .pkg.
           # Skip this when both certificates live in the same .p12.
           if [ -n "$MACOS_INSTALLER_CERT_P12" ]; then
-            printf '%s' "$MACOS_INSTALLER_CERT_P12" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+            printf '%s' "$MACOS_INSTALLER_CERT_P12" | base64 -d > "$RUNNER_TEMP/installer.p12"
             security import "$RUNNER_TEMP/installer.p12" -k "$keychain" \
               -P "$MACOS_INSTALLER_CERT_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/pkgbuild
             rm -f "$RUNNER_TEMP/installer.p12"
@@ -167,7 +167,7 @@ jobs:
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.MACOS_CERT_P12 != '' && env.AC_API_KEY_P8 != ''
         run: |
           set -euo pipefail
-          printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac-api-key.p8"
+          printf '%s' "$AC_API_KEY_P8" | base64 -d > "$RUNNER_TEMP/ac-api-key.p8"
           # notarytool takes .zip, .pkg or .dmg, so submit a zip of the
           # binary. What gets notarized is the signature inside it.
           ditto -c -k dist/am "$RUNNER_TEMP/notarize.zip"
@@ -218,7 +218,7 @@ jobs:
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.PKG != '' && env.AC_API_KEY_P8 != ''
         run: |
           set -euo pipefail
-          printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac-api-key.p8"
+          printf '%s' "$AC_API_KEY_P8" | base64 -d > "$RUNNER_TEMP/ac-api-key.p8"
           xcrun notarytool submit "$PKG" \
             --key "$RUNNER_TEMP/ac-api-key.p8" \
             --key-id "$AC_API_KEY_ID" \
