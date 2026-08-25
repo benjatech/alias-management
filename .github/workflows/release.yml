@@ -163,20 +163,39 @@ jobs:
       # Notarization calls out to Apple and takes minutes, so it runs for
       # tags only. Pull requests still sign, which catches certificate
       # problems without queueing a submission on every push.
-      - name: Notarize the binary
+      # A .p8 is a text file, so the secret plausibly holds either the key
+      # itself or base64 of it. Accept both: feeding a raw PEM through
+      # base64 -d yields garbage and notarytool reports only
+      # `Error: invalidPEMDocument`, which says nothing about the cause.
+      - name: Prepare the notarization key
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.MACOS_CERT_P12 != '' && env.AC_API_KEY_P8 != ''
         run: |
           set -euo pipefail
-          printf '%s' "$AC_API_KEY_P8" | base64 -d > "$RUNNER_TEMP/ac-api-key.p8"
+          key="$RUNNER_TEMP/ac-api-key.p8"
+          if printf '%s' "$AC_API_KEY_P8" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$AC_API_KEY_P8" > "$key"
+          else
+            printf '%s' "$AC_API_KEY_P8" | base64 -d > "$key" 2>/dev/null || true
+          fi
+          if ! grep -q -- '-----BEGIN' "$key" 2>/dev/null; then
+            echo "::error::AC_API_KEY_P8 is neither an App Store Connect .p8 key nor base64 of one. Re-add it with: base64 -i AuthKey_XXXXXXXXXX.p8 | gh secret set AC_API_KEY_P8"
+            exit 1
+          fi
+          echo "NOTARY_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: Notarize the binary
+        if: runner.os == 'macOS' && env.NOTARY_KEY != ''
+        run: |
+          set -euo pipefail
           # notarytool takes .zip, .pkg or .dmg, so submit a zip of the
           # binary. What gets notarized is the signature inside it.
           ditto -c -k dist/am "$RUNNER_TEMP/notarize.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-            --key "$RUNNER_TEMP/ac-api-key.p8" \
+            --key "$NOTARY_KEY" \
             --key-id "$AC_API_KEY_ID" \
             --issuer "$AC_API_ISSUER_ID" \
             --wait --timeout 30m
-          rm -f "$RUNNER_TEMP/ac-api-key.p8" "$RUNNER_TEMP/notarize.zip"
+          rm -f "$RUNNER_TEMP/notarize.zip"
           # A lone executable has nowhere to store a notarization ticket, so
           # it cannot be stapled and Gatekeeper checks Apple online the first
           # time it runs. The .pkg below covers the offline case.
@@ -215,16 +234,14 @@ jobs:
       # Unlike a bare executable, a .pkg can carry its notarization ticket,
       # so stapling makes it verify without a network round trip.
       - name: Notarize and staple the installer package
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.PKG != '' && env.AC_API_KEY_P8 != ''
+        if: runner.os == 'macOS' && env.PKG != '' && env.NOTARY_KEY != ''
         run: |
           set -euo pipefail
-          printf '%s' "$AC_API_KEY_P8" | base64 -d > "$RUNNER_TEMP/ac-api-key.p8"
           xcrun notarytool submit "$PKG" \
-            --key "$RUNNER_TEMP/ac-api-key.p8" \
+            --key "$NOTARY_KEY" \
             --key-id "$AC_API_KEY_ID" \
             --issuer "$AC_API_ISSUER_ID" \
             --wait --timeout 30m
-          rm -f "$RUNNER_TEMP/ac-api-key.p8"
           xcrun stapler staple "$PKG"
           xcrun stapler validate "$PKG"
           # Confirms Gatekeeper accepts the installer as distributed.
@@ -246,9 +263,11 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-      - name: Remove signing keychain
-        if: always() && runner.os == 'macOS' && env.KEYCHAIN_PATH != ''
-        run: security delete-keychain "$KEYCHAIN_PATH" || true
+      - name: Remove signing credentials
+        if: always() && runner.os == 'macOS'
+        run: |
+          [ -n "${KEYCHAIN_PATH:-}" ] && security delete-keychain "$KEYCHAIN_PATH" || true
+          rm -f "${NOTARY_KEY:-}" || true
 
   release:
     name: Publish GitHub release

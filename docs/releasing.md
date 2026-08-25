@@ -105,6 +105,11 @@ gh secret set AC_API_KEY_ID --repo benjatech/alias-management       # the 10-cha
 gh secret set AC_API_ISSUER_ID --repo benjatech/alias-management    # the issuer UUID
 ```
 
+Pasting the `.p8` file's contents into the secret verbatim works too — unlike
+the `.p12`, a `.p8` is text, and the workflow detects which form it was given.
+Anything that is neither fails early naming the secret, rather than as
+`Error: invalidPEMDocument` from deep inside notarytool.
+
 ### Homebrew tap token
 
 The release job pushes the regenerated formula into the tap repository, which
