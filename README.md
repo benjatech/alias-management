@@ -119,8 +119,9 @@ Everything is asked interactively:
    - *ssh*: the user and the host. User `forge` and host `127.0.0.1`
      become the command `ssh forge@127.0.0.1`.
 
-The alias is appended to `~/.alias-management` and — thanks to the shell
-integration — works in the current shell immediately.
+The alias is appended to `~/.alias-management`, and `am` reminds you to run
+`source ~/.alias-management` to use it in the shell you are standing in. New
+shells pick it up on their own.
 
 **In a hurry?** Give any part up front with `-f` (folder), `-c` (command)
 or `-s` (ssh) — am only asks for what is missing:
@@ -184,30 +185,29 @@ am install --help
 
 ## How the shell integration works
 
-A child process cannot change the shell that launched it, so the `am`
-binary alone could never make a new alias appear in your open terminal.
-Setup therefore installs this block into `~/.bash_profile`:
+Setup installs this block into `~/.bash_profile`:
 
 ```bash
 # >>> alias-management (am) >>>
 # Added by `am` (alias-management). Do not edit this block by hand.
-# Loads managed aliases and re-sources them after every `am` run so
-# changes take effect in the current shell immediately.
+# Loads the managed aliases when the shell starts.
 [ -f "$HOME/.alias-management" ] && source "$HOME/.alias-management"
-am() {
-    command am "$@"
-    local am_status=$?
-    if [ -f "$HOME/.alias-management" ]; then
-        source "$HOME/.alias-management"
-    fi
-    return $am_status
-}
 # <<< alias-management (am) <<<
 ```
 
-It sources your aliases when the shell starts, and wraps `am` in a function
-that re-sources them right after every `am` command — that is what makes
-`am new` take effect instantly.
+That is the whole integration: it sources your aliases when the shell starts,
+so every new shell has them.
+
+A child process cannot change the shell that launched it, so the `am` binary
+cannot make a brand-new alias appear in the terminal you are already in — only
+that shell can load it. After `am new`, run:
+
+```bash
+source ~/.alias-management
+```
+
+`am new` prints this reminder itself. `am` defines no shell function, so
+`which am` reports the binary on your `PATH` and nothing shadows it.
 
 If `am` has to create `~/.bash_profile` from scratch, it also adds a line
 sourcing `~/.profile` first: bash reads only the first of `~/.bash_profile`
