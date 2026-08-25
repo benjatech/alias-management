@@ -1,6 +1,6 @@
 # am — Alias Manager
 
-[![CI](https://github.com/mauro-baptista/alias-management/actions/workflows/ci.yml/badge.svg)](https://github.com/mauro-baptista/alias-management/actions/workflows/ci.yml)
+[![CI](https://github.com/benjatech/alias-management/actions/workflows/ci.yml/badge.svg)](https://github.com/benjatech/alias-management/actions/workflows/ci.yml)
 
 `am` is a small command-line tool (a single Rust binary) that manages your
 personal bash aliases in one dedicated file, `~/.alias-management`. It works
@@ -29,63 +29,101 @@ It manages three kinds of aliases:
 
 ## Install
 
-### Option 1 — Homebrew (macOS and Linux)
+Pick one route below, then do the [one-time setup](#after-installing-do-this-once)
+— it is required whichever route you take. `am` is a single self-contained
+executable: no runtime, no libraries, nothing to configure.
+
+### macOS
+
+**Homebrew** — the least work, and it handles upgrades:
 
 ```bash
 brew install benjatech/alias-management/am
 ```
 
-That taps and installs in one step. The two-step form works too:
+Three segments: owner, tap, formula. `brew install benjatech/alias-management`
+fails, because that is the tap name with no formula on the end. The two-step
+form does the same thing:
 
 ```bash
 brew tap benjatech/alias-management
 brew install am
 ```
 
-`brew upgrade am` later picks up new releases. The formula installs the
-prebuilt binary for your platform, so there is nothing to compile. Homebrew
-downloads with curl, which never sets the macOS quarantine flag, so
-Gatekeeper stays out of the way.
+`brew upgrade am` picks up later releases.
 
-### Option 2 — download the `am` file and put it in your bin folder
-
-`am` is a single self-contained executable — no runtime, no libraries, no
-config. Grab the file for your platform from the
-[Releases page](https://github.com/mauro-baptista/alias-management/releases)
-— `am-linux-x86_64` (fully static), `am-macos-arm64` (Apple Silicon) or
-`am-macos-x86_64` (Intel), with a `SHA256SUMS` file to verify — rename it
-to `am`, and put it in a folder on your `PATH`. The easiest way is to let
-it install itself:
+**Installer package** — download `am-macos-arm64.pkg` (Apple Silicon) or
+`am-macos-x86_64.pkg` (Intel) from the
+[latest release](https://github.com/benjatech/alias-management/releases/latest)
+and double-click it, or:
 
 ```bash
-chmod +x am        # make the downloaded file executable
-./am install       # copies it to /usr/local/bin (or ~/.local/bin without root)
+sudo installer -pkg am-macos-arm64.pkg -target /
 ```
+
+It installs `am` into `/usr/local/bin`. The package is signed and notarized,
+so Gatekeeper lets it through without complaint.
+
+**Plain binary**:
+
+```bash
+curl -fsSL -o am https://github.com/benjatech/alias-management/releases/latest/download/am-macos-arm64
+chmod +x am
+./am install        # copies it to /usr/local/bin, or ~/.local/bin without root
+```
+
+Not sure which file? `uname -m` prints `arm64` on Apple Silicon and `x86_64`
+on Intel.
+
+Downloading with `curl` also sidesteps macOS quarantine entirely. A browser
+tags downloads with `com.apple.quarantine`; the binaries are notarized, so
+Gatekeeper should clear them anyway, but if one is ever refused,
+`xattr -c am` removes the tag.
+
+### Linux
+
+**Homebrew**, if you use it:
+
+```bash
+brew install benjatech/alias-management/am
+```
+
+**Plain binary** — statically linked against musl, so it runs on any x86_64
+distribution regardless of glibc version:
+
+```bash
+curl -fsSL -o am https://github.com/benjatech/alias-management/releases/latest/download/am-linux-x86_64
+chmod +x am
+./am install
+```
+
+### Both platforms
 
 `sudo ./am install` forces the system-wide folder, and `./am install ~/bin`
-installs into a folder of your choice — am tells you if that folder is not
-on your PATH and exactly which line to add. Doing it by hand works just as
-well:
+installs into a folder of your choice — `am` tells you if that folder is not
+on your `PATH`, and exactly which line to add. By hand works just as well:
 
 ```bash
-# system-wide (needs sudo)
-sudo cp am /usr/local/bin/ && sudo chmod +x /usr/local/bin/am
-
-# or user-only (make sure the folder is on your PATH)
-mkdir -p ~/.local/bin && cp am ~/.local/bin/ && chmod +x ~/.local/bin/am
+sudo cp am /usr/local/bin/ && sudo chmod +x /usr/local/bin/am    # system-wide
+mkdir -p ~/.local/bin && cp am ~/.local/bin/                     # user-only
 ```
 
-On macOS the release also carries a signed, notarized `.pkg` installer
-(`am-macos-arm64.pkg`) that puts `am` in `/usr/local/bin` with no Gatekeeper
-friction at all — double-click it, or `sudo installer -pkg am-macos-arm64.pkg
--target /`.
+Every release ships a `SHA256SUMS` file covering every asset. To check one
+download, pick its line out and pipe that in — the file must still have the
+name it was released under:
 
-The binary must match your OS and CPU: use a Linux build on Linux and a
-macOS build on a Mac (and mind x86_64 vs arm64). On macOS, if Gatekeeper
-blocks a downloaded binary, clear the quarantine flag with
-`xattr -d com.apple.quarantine /usr/local/bin/am`.
+```bash
+base=https://github.com/benjatech/alias-management/releases/latest/download
+curl -fsSLO "$base/am-macos-arm64"      # the asset, under its own name
+curl -fsSLO "$base/SHA256SUMS"
 
-### Option 3 — build from source
+grep " am-macos-arm64$" SHA256SUMS | shasum -a 256 -c -   # macOS
+grep " am-linux-x86_64$" SHA256SUMS | sha256sum -c -      # Linux
+```
+
+Expect `am-macos-arm64: OK`. Rename it to `am` afterwards.
+
+### Build from source
 
 With Rust 1.85+ installed:
 
@@ -96,16 +134,42 @@ cargo build --release                    # produces target/release/am
 cargo install --path .
 ```
 
-### First run
+### After installing, do this once
 
-`am install` only places the binary. Run `am` once afterwards — that first
-run sets everything up:
+Installing only places the binary. Run any `am` command once to set up the
+rest:
+
+```bash
+am list                  # any command will do
+source ~/.bash_profile   # or just open a new terminal
+```
+
+That first run:
 
 1. Creates `~/.alias-management` if it does not exist.
-2. Adds the shell-integration block (see below) to `~/.bash_profile`,
-   creating the file if needed — exactly once, never duplicated.
+2. Adds the shell-integration block (described below) to `~/.bash_profile`,
+   creating that file if needed — exactly once, never duplicated.
 
-Then restart your terminal or run `source ~/.bash_profile`.
+Without it `am` still runs, but your aliases are never loaded into a shell.
+
+### When *not* to run `am install`
+
+`am install` copies the running binary onto your `PATH`. That is the right
+move for a downloaded binary or one you just built, and the wrong move when
+something else already manages the file:
+
+| Installed with | Run `am install`? |
+|---|---|
+| Homebrew | **No** — brew already put it on your `PATH` |
+| `.pkg` installer | **No** — it installed to `/usr/local/bin` |
+| Downloaded binary | Yes |
+| `cargo build` | Yes |
+| `cargo install --path .` | No — cargo puts it in `~/.cargo/bin` |
+
+Running it anyway under Homebrew on Apple Silicon leaves a second copy in
+`/usr/local/bin` that brew does not manage and `brew upgrade` will not
+update. If you have already done that, `rm /usr/local/bin/am` removes the
+stray copy; the Homebrew one is untouched.
 
 ## How to use
 
